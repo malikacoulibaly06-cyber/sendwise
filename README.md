@@ -1,5 +1,7 @@
 # SendWise
 
+**Live:** https://web-production-a78377cd.up.railway.app — deploys automatically from `main`.
+
 Compare money-transfer providers (Wise, Revolut, Remitly, Western Union, …) against the live mid-market
 rate, pick the cheapest route, and "send" through a simulated Stripe-style checkout.
 
