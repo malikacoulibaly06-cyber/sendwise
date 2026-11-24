@@ -33,7 +33,7 @@ export function HomePage() {
       <section className="mx-auto max-w-6xl px-6 pt-20 pb-12">
         <p className="mb-5 text-[13px] font-medium uppercase tracking-[0.14em] text-clay-dark">Send money abroad, for less</p>
         <h1 className="max-w-3xl font-serif text-[44px] leading-[1.08] tracking-tight md:text-[64px]">
-          Find the cheapest route home.
+          Send more, pay less.
         </h1>
         <p className="mt-6 max-w-2xl text-[18px] leading-relaxed text-stone">
           We compare {meta.data?.providers ?? 9} money-transfer services against the live mid-market rate, so more of
