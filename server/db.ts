@@ -12,6 +12,8 @@ export type Transfer = {
   receive_currency: string;
   provider_id: string;
   provider_name: string;
+  payout_method: string;
+  pay_in_method: string;
   fee: number;
   rate: number;
   receive_amount: number;
@@ -47,6 +49,8 @@ export async function initDb() {
       receive_currency TEXT NOT NULL,
       provider_id TEXT NOT NULL,
       provider_name TEXT NOT NULL,
+      payout_method TEXT NOT NULL DEFAULT 'bank',
+      pay_in_method TEXT NOT NULL DEFAULT 'debit',
       fee NUMERIC(14,2) NOT NULL,
       rate NUMERIC(20,6) NOT NULL,
       receive_amount NUMERIC(20,2) NOT NULL,
@@ -56,6 +60,9 @@ export async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       paid_at TIMESTAMPTZ
     )`);
+  // Migrate tables created before payout / pay-in methods existed.
+  await pool.query(`ALTER TABLE transfers ADD COLUMN IF NOT EXISTS payout_method TEXT NOT NULL DEFAULT 'bank'`);
+  await pool.query(`ALTER TABLE transfers ADD COLUMN IF NOT EXISTS pay_in_method TEXT NOT NULL DEFAULT 'debit'`);
   console.log("Postgres ready");
 }
 

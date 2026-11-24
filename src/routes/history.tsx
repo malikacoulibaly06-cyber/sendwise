@@ -12,7 +12,7 @@ export function HistoryPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-16">
-      <h1 className="font-serif text-[40px] tracking-tight">My transfers</h1>
+      <h1 className="font-display text-[36px] font-extrabold tracking-tight">My transfers</h1>
       <form
         className="mt-6 flex gap-3"
         onSubmit={(e) => {
@@ -25,7 +25,7 @@ export function HistoryPage() {
         <button className="btn">Look up</button>
       </form>
 
-      {h.data && h.data.length === 0 && <p className="mt-8 text-stone">No transfers yet for {email}.</p>}
+      {h.data && h.data.length === 0 && <p className="mt-8 text-muted">No transfers yet for {email}.</p>}
       {h.data && h.data.length > 0 && (
         <div className="card mt-8 divide-y divide-line">
           {h.data.map((t) => (
@@ -33,19 +33,19 @@ export function HistoryPage() {
               key={t.id}
               to={t.status === "paid" ? "/receipt/$id" : "/checkout/$id"}
               params={{ id: t.id }}
-              className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-oat"
+              className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-mist"
             >
               <div>
                 <div className="font-medium">
                   {t.recipient_name} · {t.recipient_country}
                 </div>
-                <div className="text-[13px] text-stone">
+                <div className="text-[13px] text-muted">
                   {new Date(t.created_at).toLocaleDateString()} · via {t.provider_name}
                 </div>
               </div>
               <div className="text-right">
-                <div className="font-serif text-[18px]">{money(t.receive_amount, t.receive_currency)}</div>
-                <div className={`text-[12px] ${t.status === "paid" ? "text-sage" : "text-clay-dark"}`}>
+                <div className="font-display text-[17px] font-bold">{money(t.receive_amount, t.receive_currency)}</div>
+                <div className={`text-[12px] ${t.status === "paid" ? "text-success" : "text-warn"}`}>
                   {t.status === "paid" ? "Paid" : "Awaiting payment"}
                 </div>
               </div>
