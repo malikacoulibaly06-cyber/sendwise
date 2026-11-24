@@ -1,68 +1,63 @@
 import Stripe from "stripe";
 import type { Request, Response } from "express";
-import { getTransfer, markPaid, type Transfer } from "./db.ts";
+import { grantPro } from "./db.ts";
 
-// Stripe is enabled only when STRIPE_SECRET_KEY is set (use a TEST key:
-// sk_test_…). Keys are set as Railway variables / local .env — never in code.
+// Stripe sells one thing: Rate Watch (one-time unlock). Enabled only when
+// STRIPE_SECRET_KEY is a real API key (sk_… / rk_…). Use TEST keys.
 const raw = process.env.STRIPE_SECRET_KEY?.trim();
-// Only accept real API secret/restricted keys; anything else (e.g. a webhook
-// "whsec_" secret pasted into the wrong variable) leaves Stripe disabled.
 const key = raw && /^(sk|rk)_(test|live)_/.test(raw) ? raw : undefined;
 if (raw && !key) console.warn("STRIPE_SECRET_KEY is not an sk_/rk_ API key — Stripe disabled, using simulated checkout");
 export const stripe = key ? new Stripe(key) : null;
 export const stripeEnabled = !!stripe;
 export const stripeTestMode = !!key && /^(sk|rk)_test_/.test(key);
 
-const cents = (n: number) => Math.round(n * 100);
+export const PRO_PRICE_USD = 2.99;
 
 export function publicOrigin(req: Request) {
   if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
   return `${req.protocol}://${req.get("host")}`;
 }
 
-export async function createCheckoutSession(t: Transfer, origin: string) {
+export async function createProCheckout(email: string, origin: string) {
   if (!stripe) throw new Error("Stripe is not configured");
-  const currency = t.send_currency.toLowerCase();
   return stripe.checkout.sessions.create({
     mode: "payment",
-    customer_email: t.sender_email,
-    client_reference_id: t.id,
-    metadata: { transferId: t.id },
-    payment_intent_data: { metadata: { transferId: t.id } },
+    customer_email: email,
+    metadata: { product: "rate_watch", email },
     line_items: [
       {
         quantity: 1,
         price_data: {
-          currency,
-          unit_amount: cents(t.send_amount),
+          currency: "usd",
+          unit_amount: Math.round(PRO_PRICE_USD * 100),
           product_data: {
-            name: `Transfer to ${t.recipient_name} (${t.recipient_country})`,
-            description: `Via ${t.provider_name} · recipient gets ${t.receive_amount.toLocaleString("en-US")} ${t.receive_currency}`,
+            name: "CheapSend Rate Watch",
+            description: "Track up to 10 money-transfer routes and see when they get cheaper.",
           },
         },
       },
-      {
-        quantity: 1,
-        price_data: { currency, unit_amount: cents(t.service_fee), product_data: { name: "SendWise service fee" } },
-      },
     ],
-    success_url: `${origin}/receipt/${t.id}?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${origin}/checkout/${t.id}`,
+    success_url: `${origin}/watch?email=${encodeURIComponent(email)}&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${origin}/watch?email=${encodeURIComponent(email)}`,
   });
 }
 
-// Called by the receipt page after Stripe redirects back, so the transfer is
-// marked paid even if the webhook hasn't been configured yet.
-export async function confirmSession(transferId: string, sessionId: string) {
-  if (!stripe) return getTransfer(transferId);
+// Called when Stripe redirects back, so access is granted even before the
+// webhook is configured.
+export async function confirmProSession(sessionId: string) {
+  if (!stripe) return null;
   const s = await stripe.checkout.sessions.retrieve(sessionId);
-  if (s.metadata?.transferId === transferId && s.payment_status === "paid") return markPaid(transferId);
-  return getTransfer(transferId);
+  const email = s.metadata?.email;
+  if (s.metadata?.product === "rate_watch" && email && s.payment_status === "paid") {
+    await grantPro(email, s.id);
+    return email;
+  }
+  return null;
 }
 
 // POST /api/stripe/webhook — needs the RAW body to verify Stripe's signature.
 export async function webhook(req: Request, res: Response) {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  const secret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
   if (!stripe || !secret) return res.status(503).send("Stripe webhook not configured");
   let event: Stripe.Event;
   try {
@@ -72,7 +67,8 @@ export async function webhook(req: Request, res: Response) {
   }
   if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
     const s = event.data.object as Stripe.Checkout.Session;
-    if (s.payment_status === "paid" && s.metadata?.transferId) await markPaid(s.metadata.transferId);
+    if (s.payment_status === "paid" && s.metadata?.product === "rate_watch" && s.metadata.email)
+      await grantPro(s.metadata.email, s.id);
   }
   res.json({ received: true });
 }

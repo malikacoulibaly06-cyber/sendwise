@@ -2,11 +2,11 @@ import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { COUNTRIES, SANCTIONED } from "./countries.ts";
-import { compare, getRates, PAYIN_LABEL, type PayIn, PAYOUT_LABEL, PROVIDERS, SEND_CURRENCIES } from "./providers.ts";
-import { createTransfer, getTransfer, initDb, listTransfers, markPaid, usingPostgres } from "./db.ts";
-import { confirmSession, createCheckoutSession, publicOrigin, stripeEnabled, stripeTestMode, webhook } from "./stripe.ts";
+import { compare, PAYIN_LABEL, type PayIn, PAYOUT_LABEL, PROVIDERS, SEND_CURRENCIES } from "./providers.ts";
+import { outboundFor, promoMap } from "./affiliates.ts";
+import { addWatch, clickStats, deleteWatch, grantPro, initDb, isPro, listWatches, recordClick, usingPostgres } from "./db.ts";
+import { confirmProSession, createProCheckout, PRO_PRICE_USD, publicOrigin, stripeEnabled, stripeTestMode, webhook } from "./stripe.ts";
 
-const SERVICE_FEE_USD = 1.49; // what SendWise charges for routing the transfer
 const app = express();
 app.set("trust proxy", true);
 // Stripe webhook must see the raw body, so register it before express.json().
@@ -14,6 +14,10 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), webho
 app.use(express.json());
 
 const isPayIn = (v: unknown): v is PayIn => typeof v === "string" && v in PAYIN_LABEL;
+const cleanEmail = (v: unknown) => {
+  const e = String(v ?? "").trim().toLowerCase();
+  return /^\S+@\S+\.\S+$/.test(e) && e.length <= 200 ? e : null;
+};
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, db: usingPostgres ? "postgres" : "memory" }));
 
@@ -24,7 +28,8 @@ app.get("/api/meta", (_req, res) =>
     providers: PROVIDERS.length,
     payoutLabels: PAYOUT_LABEL,
     payInLabels: PAYIN_LABEL,
-    serviceFeeUsd: SERVICE_FEE_USD,
+    partners: promoMap(),
+    proPriceUsd: PRO_PRICE_USD,
     stripe: stripeEnabled ? (stripeTestMode ? "test" : "live") : "off",
   }),
 );
@@ -45,115 +50,137 @@ app.get("/api/compare", async (req, res) => {
   }
 });
 
-app.post("/api/transfers", async (req, res) => {
-  const b = req.body ?? {};
-  const required = ["senderName", "senderEmail", "recipientName", "amount", "from", "to", "providerId", "payout", "payIn"];
-  for (const k of required) if (!b[k]) return res.status(400).json({ error: `Missing ${k}` });
-  if (!/^\S+@\S+\.\S+$/.test(b.senderEmail)) return res.status(400).json({ error: "Invalid email" });
-  if (!isPayIn(b.payIn)) return res.status(400).json({ error: "Unsupported payment method" });
-
-  // Re-quote on the server so the client can't tamper with fees or rates.
-  const amount = Number(b.amount);
-  let result;
+// Outbound click: record it (anonymously), then redirect to the provider via
+// your affiliate link if you have one. Only known provider URLs are used, so
+// this can't be abused as an open redirect.
+app.get("/go/:provider", async (req, res) => {
+  const out = outboundFor(req.params.provider);
+  if (!out) return res.status(404).send("Unknown provider");
+  const q = req.query;
   try {
-    result = await compare(amount, String(b.from), String(b.to), b.payIn);
-  } catch (e: any) {
-    return res.status(400).json({ error: e.message });
+    await recordClick({
+      provider_id: out.providerId,
+      payout: String(q.payout ?? "").slice(0, 10) || "unknown",
+      pay_in: String(q.payIn ?? "").slice(0, 10) || "unknown",
+      send_currency: String(q.from ?? "").slice(0, 3).toUpperCase() || "USD",
+      amount: Math.min(Math.max(Number(q.amount) || 0, 0), 1_000_000),
+      country_iso: String(q.to ?? "").slice(0, 2).toUpperCase() || "??",
+      affiliate: out.affiliate,
+    });
+  } catch (e) {
+    console.error("click log failed", e);
   }
-  if (result.blocked) return res.status(400).json({ error: "Transfers to this country are not available (sanctions)." });
-  const q = result.routes.find((x) => x.providerId === b.providerId && x.payout === b.payout);
-  if (!q) return res.status(400).json({ error: "That route is not available" });
-
-  const { rates } = await getRates();
-  const serviceFee = Math.round(SERVICE_FEE_USD * rates[String(b.from)] * 100) / 100;
-
-  const t = await createTransfer({
-    sender_name: String(b.senderName).slice(0, 100),
-    sender_email: String(b.senderEmail).toLowerCase().slice(0, 200),
-    recipient_name: String(b.recipientName).slice(0, 100),
-    recipient_country: result.country.name,
-    send_amount: amount,
-    send_currency: String(b.from),
-    receive_currency: result.country.currency,
-    provider_id: q.providerId,
-    provider_name: q.providerName,
-    payout_method: q.payout,
-    pay_in_method: b.payIn,
-    fee: q.fee,
-    rate: q.rate,
-    receive_amount: q.receiveAmount,
-    service_fee: serviceFee,
-    total_charged: Math.round((amount + serviceFee) * 100) / 100,
-  });
-  res.status(201).json(t);
+  res.set("Referrer-Policy", "no-referrer-when-downgrade");
+  res.redirect(302, out.url);
 });
 
-app.get("/api/transfers/:id", async (req, res) => {
-  const t = await getTransfer(req.params.id);
-  t ? res.json(t) : res.status(404).json({ error: "Not found" });
+app.get("/api/stats", async (_req, res) => res.json(await clickStats()));
+
+// ---- Rate Watch (the paid feature) ----
+
+async function bestFor(amount: number, from: string, iso: string, payIn: PayIn) {
+  const r = await compare(amount, from, iso, payIn);
+  return { country: r.country, best: r.routes[0] ?? null };
+}
+
+app.get("/api/watch", async (req, res) => {
+  const email = cleanEmail(req.query.email);
+  if (!email) return res.status(400).json({ error: "Enter a valid email" });
+  const pro = await isPro(email);
+  const watches = pro ? await listWatches(email) : [];
+  const withNow = await Promise.all(
+    watches.map(async (w) => {
+      try {
+        const { country, best } = await bestFor(w.amount, w.send_currency, w.country_iso, w.pay_in as PayIn);
+        return { ...w, country, now: best };
+      } catch {
+        return { ...w, country: null, now: null };
+      }
+    }),
+  );
+  res.json({ email, pro, watches: withNow });
 });
 
-// Simulated checkout: no real money moves. Card details are checked for shape
-// only and are never stored or logged. Bank and cash pay-ins are confirmed
-// with a single simulated step.
-app.post("/api/transfers/:id/pay", async (req, res) => {
-  const t0 = await getTransfer(req.params.id);
-  if (!t0) return res.status(404).json({ error: "Not found" });
-  if (t0.pay_in_method === "debit" || t0.pay_in_method === "credit") {
-    if (stripeEnabled) return res.status(409).json({ error: "Card payments go through Stripe Checkout." });
-    const { cardNumber, expiry, cvc } = req.body ?? {};
-    const digits = String(cardNumber ?? "").replace(/\s/g, "");
-    if (digits !== "4242424242424242")
-      return res.status(402).json({ error: "Your card was declined. This is a demo — use the test card 4242 4242 4242 4242." });
-    const m = /^(\d{2})\s*\/\s*(\d{2})$/.exec(String(expiry ?? ""));
-    if (!m || Number(m[1]) < 1 || Number(m[1]) > 12 || new Date(2000 + Number(m[2]), Number(m[1])) < new Date())
-      return res.status(400).json({ error: "Enter a valid future expiry date (MM/YY)." });
-    if (!/^\d{3,4}$/.test(String(cvc ?? ""))) return res.status(400).json({ error: "Enter a valid CVC." });
-  }
-  const t = await markPaid(req.params.id);
-  t ? res.json(t) : res.status(404).json({ error: "Not found" });
-});
-
-// Real Stripe Checkout (test mode) for card pay-ins, when keys are configured.
-app.post("/api/transfers/:id/stripe-session", async (req, res) => {
-  if (!stripeEnabled) return res.status(503).json({ error: "Stripe is not configured" });
-  const t = await getTransfer(req.params.id);
-  if (!t) return res.status(404).json({ error: "Not found" });
-  if (t.status === "paid") return res.status(409).json({ error: "Already paid" });
+app.post("/api/watch/checkout", async (req, res) => {
+  const email = cleanEmail(req.body?.email);
+  if (!email) return res.status(400).json({ error: "Enter a valid email" });
+  if (await isPro(email)) return res.json({ alreadyPro: true });
+  if (!stripeEnabled) return res.json({ simulated: true });
   try {
-    const session = await createCheckoutSession(t, publicOrigin(req));
-    res.json({ url: session.url });
+    const s = await createProCheckout(email, publicOrigin(req));
+    res.json({ url: s.url });
   } catch (e: any) {
     console.error("Stripe session error", e.message);
     res.status(502).json({ error: "Could not start Stripe checkout" });
   }
 });
 
-app.post("/api/transfers/:id/confirm", async (req, res) => {
+// Simulated card payment — only available while Stripe isn't configured.
+app.post("/api/watch/simulate-pay", async (req, res) => {
+  if (stripeEnabled) return res.status(409).json({ error: "Payments go through Stripe Checkout." });
+  const email = cleanEmail(req.body?.email);
+  if (!email) return res.status(400).json({ error: "Enter a valid email" });
+  const digits = String(req.body?.cardNumber ?? "").replace(/\s/g, "");
+  if (digits !== "4242424242424242")
+    return res.status(402).json({ error: "Card declined. This is a demo — use the test card 4242 4242 4242 4242." });
+  await grantPro(email, null);
+  res.json({ ok: true });
+});
+
+app.post("/api/watch/confirm", async (req, res) => {
   const sessionId = String(req.body?.sessionId ?? "");
   if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) return res.status(400).json({ error: "Invalid session" });
   try {
-    const t = await confirmSession(req.params.id, sessionId);
-    t ? res.json(t) : res.status(404).json({ error: "Not found" });
-  } catch (e: any) {
+    const email = await confirmProSession(sessionId);
+    email ? res.json({ email, pro: true }) : res.status(402).json({ error: "Payment not completed" });
+  } catch {
     res.status(400).json({ error: "Could not confirm payment" });
   }
 });
 
-app.get("/api/history", async (req, res) => {
-  const email = String(req.query.email ?? "").toLowerCase();
-  if (!email) return res.status(400).json({ error: "email required" });
-  res.json(await listTransfers(email));
+app.post("/api/watch", async (req, res) => {
+  const b = req.body ?? {};
+  const email = cleanEmail(b.email);
+  if (!email) return res.status(400).json({ error: "Enter a valid email" });
+  if (!(await isPro(email))) return res.status(402).json({ error: "Unlock Rate Watch first" });
+  const amount = Number(b.amount);
+  const from = String(b.from ?? "").toUpperCase();
+  const iso = String(b.to ?? "").toUpperCase();
+  if (!Number.isFinite(amount) || amount < 10 || amount > 50000) return res.status(400).json({ error: "Invalid amount" });
+  if (!SEND_CURRENCIES.includes(from) || !isPayIn(b.payIn)) return res.status(400).json({ error: "Invalid route" });
+  try {
+    const { best } = await bestFor(amount, from, iso, b.payIn);
+    if (!best) return res.status(400).json({ error: "No route available to watch" });
+    await addWatch({
+      email,
+      amount,
+      send_currency: from,
+      country_iso: iso,
+      pay_in: b.payIn,
+      baseline_receive: best.receiveAmount,
+      baseline_provider: best.providerName,
+    });
+    res.status(201).json({ ok: true });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete("/api/watch/:id", async (req, res) => {
+  const email = cleanEmail(req.query.email);
+  if (!email) return res.status(400).json({ error: "Enter a valid email" });
+  await deleteWatch(email, req.params.id);
+  res.json({ ok: true });
 });
 
 // Serve the built front end in production.
 const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist");
 app.use(express.static(dist));
-app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.join(dist, "index.html")));
+app.get(/^(?!\/api|\/go\/).*/, (_req, res) => res.sendFile(path.join(dist, "index.html")));
 
 const port = Number(process.env.PORT ?? 3001);
 initDb()
-  .then(() => app.listen(port, () => console.log(`SendWise listening on :${port}`)))
+  .then(() => app.listen(port, () => console.log(`CheapSend listening on :${port}`)))
   .catch((e) => {
     console.error("DB init failed", e);
     process.exit(1);

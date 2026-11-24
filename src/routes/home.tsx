@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { api, money, type PayIn, type Payout, PAYIN_ICON, PAYOUT_ICON } from "../api";
+import { Link } from "@tanstack/react-router";
+import { api, DISCLOSURE, goUrl, money, type PayIn, type Payout, PAYIN_ICON, PAYOUT_ICON } from "../api";
 
 const PAYINS: PayIn[] = ["bank", "debit", "credit", "cash"];
 const PAYOUTS: Payout[] = ["bank", "cash", "mobile", "card"];
@@ -61,7 +62,7 @@ export function HomePage() {
           </h1>
           <p className="mt-5 max-w-2xl text-[17px] leading-relaxed text-white/70">
             Compare every route home — bank deposit, cash pickup, mobile money and card — against the live mid-market rate
-            and your own bank's wire fees.
+            and your own bank's wire fees. Then go straight to the cheapest provider. Free, always.
           </p>
         </div>
       </section>
@@ -174,7 +175,17 @@ export function HomePage() {
                   </div>
                 </div>
 
-                <div className="card mt-4 overflow-hidden">
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-[12px] text-muted">
+                  <span className="max-w-3xl">{DISCLOSURE}</span>
+                  <Link
+                    to="/watch"
+                    search={{ amount: submitted.amount, from: submitted.from, to: submitted.to, payIn: submitted.payIn }}
+                    className="chip"
+                  >
+                    🔔 Watch this route
+                  </Link>
+                </div>
+                <div className="card mt-3 overflow-hidden">
                   <div className="hidden grid-cols-[1.5fr_1.1fr_0.8fr_1fr_1.3fr_auto] gap-4 border-b border-line bg-mist px-5 py-3 text-[12px] font-semibold uppercase tracking-wider text-muted md:grid">
                     <div>Provider</div>
                     <div>Receive as</div>
@@ -194,6 +205,11 @@ export function HomePage() {
                           <span className="text-[13px] font-medium text-muted">#{i + 1}</span>
                           {q.providerName}
                           {isBest && <span className="rounded-full bg-brand px-2 py-0.5 text-[11px] font-semibold text-white">Cheapest</span>}
+                          {meta.data?.partners[q.providerId]?.promo && (
+                            <span className="rounded-full bg-[#fff4d6] px-2 py-0.5 text-[11px] font-semibold text-warn">
+                              🎁 {meta.data.partners[q.providerId].promo}
+                            </span>
+                          )}
                         </div>
                         <div className="text-[14px]">
                           {PAYOUT_ICON[q.payout]} {labels?.[q.payout]}
@@ -206,17 +222,14 @@ export function HomePage() {
                           <div className="text-[12px] text-muted">Total cost {money(q.totalCost, submitted.from)}</div>
                         </div>
                         <div>
-                          <button
-                            className={isBest ? "btn" : "btn-ghost"}
-                            onClick={() =>
-                              navigate({
-                                to: "/send",
-                                search: { ...submitted, provider: q.providerId, payout: q.payout },
-                              })
-                            }
+                          <a
+                            className={`whitespace-nowrap ${isBest ? "btn" : "btn-ghost"}`}
+                            href={goUrl(q.providerId, { ...submitted, payout: q.payout })}
+                            target="_blank"
+                            rel="sponsored noopener"
                           >
-                            Send
-                          </button>
+                            Go to {q.providerName.split(" ")[0]} →
+                          </a>
                         </div>
                       </div>
                     );

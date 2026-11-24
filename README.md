@@ -1,30 +1,43 @@
-# SendWise
+# CheapSend
 
 **Live:** https://web-production-a78377cd.up.railway.app — deploys automatically from `main`.
 
-Compare every route to send money abroad — 200 countries, 11 providers (Wise, Revolut, Remitly, Sendwave,
-Taptap Send, WorldRemit, Xe, Ria, MoneyGram, Western Union, Xoom) across bank deposit, cash pickup, mobile money
-and debit-card payouts — paid by bank account, debit card, credit card or cash at an agent. Also compares the
-SWIFT wire cost from major banks in each sending currency (USD, EUR, GBP, CAD, AUD, CHF).
+CheapSend compares every way to send money abroad — 200 countries, 11 providers (Wise, Revolut, Remitly, Sendwave,
+Taptap Send, WorldRemit, Xe, Ria, MoneyGram, Western Union, Xoom), bank deposit / cash pickup / mobile money / card
+payouts, paid by bank, debit, credit or cash — plus the SWIFT wire cost from major banks in USD, EUR, GBP, CAD, AUD
+and CHF. It doesn't move money: users click through to the cheapest provider and send there.
 
-**Class demo:** exchange rates are live mid-market rates; provider and bank fees are estimates of typical published
-pricing. Card payments use Stripe Checkout in test mode when `STRIPE_SECRET_KEY` is set, otherwise a simulated
-checkout (test card `4242 4242 4242 4242`). No real money moves.
+## Business model
+1. **Affiliate referrals** — "Go to …" buttons go through `/go/<provider>`, which logs an anonymous click and
+   redirects to your affiliate link. Commissions are paid by each program/network (to your bank or PayPal), not Stripe.
+2. **Rate Watch** — a one-time $2.99 unlock (Stripe Checkout) to track up to 10 routes.
+
+Rankings are always by what the recipient gets, never by commission, and an affiliate disclosure is shown on every page.
+
+## Adding affiliate links and promo codes (Railway → web → Variables)
+| Variable | Example |
+|---|---|
+| `AFFILIATE_URL_WISE` | your Wise (Partnerize) tracking link |
+| `AFFILIATE_URL_REMITLY` | your Remitly affiliate link |
+| `AFFILIATE_URL_WESTERNUNION` | … |
+| `PROMO_REMITLY` | `First transfer fee-free` (only codes the program allows you to publish) |
+
+Provider IDs: `wise revolut remitly sendwave taptapsend worldremit xe ria moneygram westernunion xoom`.
+Without a variable the button links to the provider's normal site. Click counts are at `/stats`.
 
 ## Stripe setup (test mode)
-1. Stripe Dashboard → Developers → API keys → copy the **test** secret key (`sk_test_…`).
-2. Railway → sendwise → web → Variables → add `STRIPE_SECRET_KEY`.
-3. Stripe → Workbench → Webhooks → add endpoint `https://web-production-a78377cd.up.railway.app/api/stripe/webhook`,
-   events `checkout.session.completed` and `checkout.session.async_payment_succeeded`.
-4. Copy the signing secret (`whsec_…`) → Railway variable `STRIPE_WEBHOOK_SECRET`.
+1. Stripe → Developers → API keys → copy the **secret** test key (`sk_test_…`) → Railway variable `STRIPE_SECRET_KEY`.
+2. Stripe → Workbench → Webhooks → endpoint `https://web-production-a78377cd.up.railway.app/api/stripe/webhook`,
+   events `checkout.session.completed`, `checkout.session.async_payment_succeeded` → copy the signing secret
+   (`whsec_…`) → Railway variable `STRIPE_WEBHOOK_SECRET`.
+Without a valid key, Rate Watch uses a simulated checkout (test card `4242 4242 4242 4242`).
 
-Stack: React + Tailwind + TanStack Router/Query (Vite) · Express API · Postgres (in-memory fallback when
-`DATABASE_URL` is unset). Live FX from open.er-api.com.
+## Stack / dev
+React + Tailwind + TanStack Router/Query (Vite) · Express API · Postgres (in-memory fallback without `DATABASE_URL`).
+Live FX from open.er-api.com. Provider and bank fees are estimates of typical published pricing.
 
 ```bash
 npm install
 npm run dev:server   # API on :3001
-npm run dev          # front end on :5173 (proxies /api)
+npm run dev          # front end on :5173 (proxies /api and /go)
 ```
-
-Production: `npm run build && npm start` (serves `dist/` + API on `$PORT`).
