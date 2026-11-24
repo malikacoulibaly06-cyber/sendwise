@@ -4,10 +4,14 @@ import { getTransfer, markPaid, type Transfer } from "./db.ts";
 
 // Stripe is enabled only when STRIPE_SECRET_KEY is set (use a TEST key:
 // sk_test_…). Keys are set as Railway variables / local .env — never in code.
-const key = process.env.STRIPE_SECRET_KEY;
+const raw = process.env.STRIPE_SECRET_KEY?.trim();
+// Only accept real API secret/restricted keys; anything else (e.g. a webhook
+// "whsec_" secret pasted into the wrong variable) leaves Stripe disabled.
+const key = raw && /^(sk|rk)_(test|live)_/.test(raw) ? raw : undefined;
+if (raw && !key) console.warn("STRIPE_SECRET_KEY is not an sk_/rk_ API key — Stripe disabled, using simulated checkout");
 export const stripe = key ? new Stripe(key) : null;
 export const stripeEnabled = !!stripe;
-export const stripeTestMode = !!key?.startsWith("sk_test_");
+export const stripeTestMode = !!key && /^(sk|rk)_test_/.test(key);
 
 const cents = (n: number) => Math.round(n * 100);
 
